@@ -1,0 +1,151 @@
+import streamlit as st
+import cv2
+import mediapipe as mp
+import numpy as np
+from gtts import gTTS
+import os
+import tempfile
+import time
+
+# Set Page Config
+st.set_page_config(page_title="CAMCOM - Sign Language Detection", layout="wide")
+
+# Load Custom Font
+st.markdown(
+    """
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+        body {
+            background-color: #000000;
+            color: #33ff33;
+            # text-shadow: 3px 3px 0px #001100;
+            font-family: 'Press Start 2P', cursive !important;
+        }
+        .crt-effect {
+            font-family: 'Press Start 2P', cursive;
+            text-align: center;
+            font-size: 18px;
+            animation: flicker 1.5s infinite alternate;
+        }
+        @keyframes flicker {
+            0% { opacity: 0.98; }
+            100% { opacity: 1; }
+        }
+        .border-box {
+            border: 4px solid #00ff00;
+            padding: 10px;
+            box-shadow: 0px 0px 10px #00ff00;
+            background: #111;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.8,
+    min_tracking_confidence=0.8
+)
+
+# Sign Language Dictionary (A–E)
+SIGN_DICT = {
+    "A": [0, 0, 0, 0, 0],  # All fingers closed
+    "B": [1, 1, 1, 1, 1],  # All fingers open
+    "C": [0, 1, 1, 1, 1],  # Thumb closed, others open
+    "D": [0, 1, 0, 0, 0],  # Only index open
+    "E": [0, 0, 1, 1, 1],  # Thumb & index closed, others open
+}
+
+# Function to Recognize Sign
+def recognize_sign(fingers):
+    for letter, pattern in SIGN_DICT.items():
+        if fingers == pattern:
+            return letter
+    return None
+
+# Layout
+st.markdown("<h1 class='crt-effect'>🤟 CAMCOM - Sign Language Detection</h1>", unsafe_allow_html=True)
+st.markdown("<p class='crt-effect'>Show your hand to detect ASL signs (A–E)!</p>", unsafe_allow_html=True)
+
+# Create Layout with 2 Columns: Left (Camera) and Right (Output)
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    start = st.button("Start Camera", help="Click to start webcam")
+
+with col2:
+    st.markdown("<h2 class='crt-effect'>Detected Output</h2>", unsafe_allow_html=True)
+    output_box = st.empty()
+
+if start:
+    cap = cv2.VideoCapture(0)
+    frame_placeholder = col1.empty()
+
+    last_detected_sign = None
+    last_speech_time = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            st.error("❌ Failed to capture frame!")
+            break
+
+        # Flip frame & convert to RGB for MediaPipe
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb_frame)
+
+        detected_sign = ""
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                landmarks = [[lm.x, lm.y] for lm in hand_landmarks.landmark]
+
+                # Thumb detection (x-coordinates since thumb moves sideways)
+                thumb_tip_x = landmarks[4][0]
+                thumb_base_x = landmarks[2][0]
+                thumb_open = 1 if thumb_tip_x > thumb_base_x else 0
+
+                # Other fingers detection (y-coordinates)
+                fingers = [
+                    thumb_open,
+                    1 if landmarks[8][1] < landmarks[6][1] else 0,
+                    1 if landmarks[12][1] < landmarks[10][1] else 0,
+                    1 if landmarks[16][1] < landmarks[14][1] else 0,
+                    1 if landmarks[20][1] < landmarks[18][1] else 0,
+                ]
+
+                detected_sign = recognize_sign(fingers)
+
+        # Overlay detection result
+        if detected_sign:
+            cv2.putText(frame, f"Sign: {detected_sign}", (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3, cv2.LINE_AA)
+
+        # Display video in Streamlit
+        frame_placeholder.image(frame, channels="BGR", caption="Live Camera Feed")
+        output_box.markdown(
+            f"<div class='border-box'><h1 class='crt-effect'>{detected_sign if detected_sign else 'None'}</h1></div>",
+            unsafe_allow_html=True
+        )
+
+        # Play sound only when a new sign is detected
+        current_time = time.time()
+        if detected_sign and detected_sign != last_detected_sign and (current_time - last_speech_time > 1.5):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
+                tts = gTTS(detected_sign)
+                tts.save(temp_audio.name)
+                os.system(f"mpg123 {temp_audio.name}")
+                last_speech_time = current_time
+                last_detected_sign = detected_sign
+
+    cap.release()
+    cv2.destroyAllWindows()
